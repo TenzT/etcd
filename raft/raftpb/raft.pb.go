@@ -201,6 +201,7 @@ func (ConfChangeType) EnumDescriptor() ([]byte, []int) {
 	return fileDescriptor_b042552c306ae59b, []int{2}
 }
 
+// LogEntry
 type Entry struct {
 	Term                 uint64    `protobuf:"varint,2,opt,name=Term" json:"Term"`
 	Index                uint64    `protobuf:"varint,3,opt,name=Index" json:"Index"`

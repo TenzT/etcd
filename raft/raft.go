@@ -226,9 +226,12 @@ func (c *Config) validate() error {
 }
 
 type raft struct {
+	// 节点Id
 	id uint64
 
 	Term uint64
+
+	// 当前任期中当前节点将选票投给了哪个节点，未投票时该字段为None
 	Vote uint64
 
 	readStates []ReadState
@@ -236,10 +239,14 @@ type raft struct {
 	// the log
 	raftLog *raftLog
 
+	// 当该状态的消息超过maxInflight时，暂停当前节点的消息发送，
+	// 防止集群中某个节点不断发消息引起网络阻塞或压垮其他几诶但
 	maxInflight int
 	maxMsgSize  uint64
-	prs         map[uint64]*Progress
-	learnerPrs  map[uint64]*Progress
+
+	// 封装了Leader必须存储的NextIndex（下一个期待的）和MatchIndex（已经复制了的）
+	prs        map[uint64]*Progress
+	learnerPrs map[uint64]*Progress
 
 	state StateType
 
@@ -248,6 +255,7 @@ type raft struct {
 
 	votes map[uint64]bool
 
+	// 缓存了当前节点等待发送的消息。
 	msgs []pb.Message
 
 	// the leader id
@@ -270,8 +278,13 @@ type raft struct {
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
 
+	// checkQuorum机制的意思是：每隔一段时间，Leader节点会尝试连接集群中的其他节点（发送心跳信息），
+	// 如果发现自己可连接到节点个数没有超过把书，则主动切换成Follower状态
 	checkQuorum bool
-	preVote     bool
+	// preVote优化：当Follower准备发起一次选举之前，会先连接集群中的其他节点，并询问它们是否愿意参与选举，
+	// 如果集群中的其他节点能够正常收到Leader节点的心跳信息，则会拒绝参与选举，繁殖参与，如果有超过半数节点
+	// 相应并参与新一轮选举，则可以发起新一轮的选举
+	preVote bool
 
 	heartbeatTimeout int
 	electionTimeout  int

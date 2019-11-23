@@ -110,6 +110,7 @@ func (rd Ready) containsUpdates() bool {
 }
 
 // Node represents a node in a raft cluster.
+// Node表示集群中的一个节点
 type Node interface {
 	// Tick increments the internal logical clock for the Node by a single tick. Election
 	// timeouts and heartbeat timeouts are in units of ticks.
@@ -174,6 +175,7 @@ type Peer struct {
 
 // StartNode returns a new Node given configuration and a list of raft peers.
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
+// 创建对应的node实例和底层的raft实例
 func StartNode(c *Config, peers []Peer) Node {
 	r := newRaft(c)
 	// become the follower at term 1 and apply initial configuration
@@ -225,6 +227,7 @@ func RestartNode(c *Config) Node {
 }
 
 // node is the canonical implementation of the Node interface
+// raft相当于一个
 type node struct {
 	propc      chan pb.Message
 	recvc      chan pb.Message
@@ -270,6 +273,7 @@ func (n *node) Stop() {
 	<-n.done
 }
 
+// node运行的主体
 func (n *node) run(r *raft) {
 	var propc chan pb.Message
 	var readyc chan Ready
