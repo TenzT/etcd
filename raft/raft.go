@@ -304,11 +304,13 @@ func newRaft(c *Config) *raft {
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
+	// 创建raftLog实例，用于记录Entry记录
 	raftlog := newLog(c.Storage, c.Logger)
 	hs, cs, err := c.Storage.InitialState()
 	if err != nil {
 		panic(err) // TODO(bdarnell)
 	}
+	// peers都以编号代替
 	peers := c.peers
 	learners := c.learners
 	if len(cs.Nodes) > 0 || len(cs.Learners) > 0 {
@@ -332,12 +334,16 @@ func newRaft(c *Config) *raft {
 		learnerPrs:                make(map[uint64]*Progress),
 		electionTimeout:           c.ElectionTick,
 		heartbeatTimeout:          c.HeartbeatTick,
-		logger:                    c.Logger,
+		logger:                    c.Logger,	// 普通日志输出
 		checkQuorum:               c.CheckQuorum,
 		preVote:                   c.PreVote,
 		readOnly:                  newReadOnly(c.ReadOnlyOption),
 		disableProposalForwarding: c.DisableProposalForwarding,
 	}
+
+	// 初始化raft.prs字段，为每个节点初始化Progress实例，
+	// 在Progress中维护了对应节点的NextIndex值和MatchIndex值，
+	// 只有Leader的prs字段是有效的
 	for _, p := range peers {
 		r.prs[p] = &Progress{Next: 1, ins: newInflights(r.maxInflight)}
 	}
@@ -351,12 +357,15 @@ func newRaft(c *Config) *raft {
 		}
 	}
 
+	// 根据从Storage中获取的HardState，初始化raftLog.committed字段
 	if !isHardStateEqual(hs, emptyState) {
 		r.loadState(hs)
 	}
 	if c.Applied > 0 {
 		raftlog.appliedTo(c.Applied)
 	}
+
+	// 当前节点切换成Follower状态
 	r.becomeFollower(r.Term, None)
 
 	var nodesStrs []string
@@ -426,6 +435,7 @@ func (r *raft) send(m pb.Message) {
 			m.Term = r.Term
 		}
 	}
+	// 将待发送的消息追加到raft.msgs中
 	r.msgs = append(r.msgs, m)
 }
 
@@ -438,6 +448,7 @@ func (r *raft) getProgress(id uint64) *Progress {
 }
 
 // sendAppend sends RPC, with entries to the given peer.
+// 向指定节点Append日志
 func (r *raft) sendAppend(to uint64) {
 	pr := r.getProgress(to)
 	if pr.IsPaused() {
@@ -566,6 +577,7 @@ func (r *raft) maybeCommit() bool {
 		mis = append(mis, p.Match)
 	}
 	sort.Sort(sort.Reverse(mis))
+	// raft.quorum()方法返回的值是集群节点的半数+1
 	mci := mis[r.quorum()-1]
 	return r.raftLog.maybeCommit(mci, r.Term)
 }
@@ -595,15 +607,18 @@ func (r *raft) reset(term uint64) {
 	r.readOnly = newReadOnly(r.readOnly.option)
 }
 
+// Leader上的appendEntries，面对的是用户输入的Entry
 func (r *raft) appendEntry(es ...pb.Entry) {
-	li := r.raftLog.lastIndex()
-	for i := range es {
-		es[i].Term = r.Term
-		es[i].Index = li + 1 + uint64(i)
+	li := r.raftLog.lastIndex()		// 获取raftLog中最后一条记录的索引值
+	for i := range es {				// 更新待追加记录的Term值和索引值
+		es[i].Term = r.Term			// Entry记录的Term指定为当前Leader节点的任期号
+		es[i].Index = li + 1 + uint64(i)	// 为日志记录指定Index
 	}
-	r.raftLog.append(es...)
+	r.raftLog.append(es...)	// 向raftLog中追加记录
+	// 更新当前节点对应的Progress们主要是更新Next和Match
 	r.getProgress(r.id).maybeUpdate(r.raftLog.lastIndex())
 	// Regardless of maybeCommit's return, our caller will call bcastAppend.
+	// 尝试提交Entry记录，但是并不在乎提交是否成功
 	r.maybeCommit()
 }
 
@@ -613,7 +628,7 @@ func (r *raft) tickElection() {
 
 	if r.promotable() && r.pastElectionTimeout() {
 		r.electionElapsed = 0
-		r.Step(pb.Message{From: r.id, Type: pb.MsgHup})
+		r.Step(pb.Message{From: r.id, Type: pb.MsgHup})	// 发起选举
 	}
 }
 
@@ -643,10 +658,13 @@ func (r *raft) tickHeartbeat() {
 	}
 }
 
+// 转换状态为Follower
 func (r *raft) becomeFollower(term uint64, lead uint64) {
+	// stepFollower()函数中封装了Follower节点处理消息的行为
 	r.step = stepFollower
-	r.reset(term)
-	r.tick = r.tickElection
+	r.reset(term)	// 重置term和vote字段
+	r.tick = r.tickElection	// 在node中会周期性调用tickElection推进electionElapsed
+							// 并检测是否超时，如果是，则会发起选举
 	r.lead = lead
 	r.state = StateFollower
 	r.logger.Infof("%x became follower at term %d", r.id, r.Term)
@@ -691,6 +709,7 @@ func (r *raft) becomeLeader() {
 	r.tick = r.tickHeartbeat
 	r.lead = r.id
 	r.state = StateLeader
+	// 获取当前节点中所有未提交的Entry记录
 	ents, err := r.raftLog.entries(r.raftLog.committed+1, noLimit)
 	if err != nil {
 		r.logger.Panicf("unexpected error getting uncommitted entries (%v)", err)
@@ -704,6 +723,7 @@ func (r *raft) becomeLeader() {
 		r.pendingConf = true
 	}
 
+	// 向当前节点的raftLog追加一条空的Entry记录
 	r.appendEntry(pb.Entry{Data: nil})
 	r.logger.Infof("%x became leader at term %d", r.id, r.Term)
 }
@@ -717,20 +737,26 @@ func (r *raft) campaign(t CampaignType) {
 		// PreVote RPCs are sent for the next term before we've incremented r.Term.
 		term = r.Term + 1
 	} else {
+		// 转换状态
 		r.becomeCandidate()
+		// 对别的节点而言，这就是Vote（请求选票）的请求
 		voteMsg = pb.MsgVote
 		term = r.Term
 	}
+	// 统计当前节点收到的选票，并统计其得票数是否超过半数，这次检测主要是为单节点设置的
 	if r.quorum() == r.poll(r.id, voteRespMsgType(voteMsg), true) {
 		// We won the election after voting for ourselves (which must mean that
 		// this is a single-node cluster). Advance to the next state.
 		if t == campaignPreElection {
 			r.campaign(campaignElection)
 		} else {
+			// 满足选票变成Leader
 			r.becomeLeader()
 		}
 		return
 	}
+
+	// 向除自己以外的节点广播特定的消息
 	for id := range r.prs {
 		if id == r.id {
 			continue
@@ -746,6 +772,7 @@ func (r *raft) campaign(t CampaignType) {
 	}
 }
 
+// 返回已得投票数
 func (r *raft) poll(id uint64, t pb.MessageType, v bool) (granted int) {
 	if v {
 		r.logger.Infof("%x received %s from %x at term %d", r.id, t, id, r.Term)
@@ -823,18 +850,22 @@ func (r *raft) Step(m pb.Message) error {
 		return nil
 	}
 
-	switch m.Type {
+	switch m.Type {	// 根据Message的Type进行分类处理
 	case pb.MsgHup:
 		if r.state != StateLeader {
+			// 获取raftLog中已提交但未应用的Entry记录
 			ents, err := r.raftLog.slice(r.raftLog.applied+1, r.raftLog.committed+1, noLimit)
 			if err != nil {
 				r.logger.Panicf("unexpected error getting unapplied entries (%v)", err)
 			}
+
+			// 检测是否有未应用的 EntryConfChange 记录，如果有就放弃发起选举的机会
 			if n := numOfPendingConf(ents); n != 0 && r.raftLog.committed > r.raftLog.applied {
 				r.logger.Warningf("%x cannot campaign at term %d since there are still %d pending configuration changes to apply", r.id, r.Term, n)
 				return nil
 			}
 
+			// 下面开始进行选举
 			r.logger.Infof("%x is starting a new election at term %d", r.id, r.Term)
 			if r.preVote {
 				r.campaign(campaignPreElection)
@@ -845,6 +876,7 @@ func (r *raft) Step(m pb.Message) error {
 			r.logger.Debugf("%x ignoring MsgHup because already leader", r.id)
 		}
 
+	// 收到Candidate的选举请求
 	case pb.MsgVote, pb.MsgPreVote:
 		if r.isLearner {
 			// TODO: learner may need to vote, in case of node down when confchange.
@@ -878,6 +910,7 @@ func (r *raft) Step(m pb.Message) error {
 			r.send(pb.Message{To: m.From, Term: r.Term, Type: voteRespMsgType(m.Type), Reject: true})
 		}
 
+	// 其余信息通通交给对应身份的信息处理器
 	default:
 		r.step(r, m)
 	}
@@ -886,6 +919,7 @@ func (r *raft) Step(m pb.Message) error {
 
 type stepFunc func(r *raft, m pb.Message)
 
+// Leader的信息处理器
 func stepLeader(r *raft, m pb.Message) {
 	// These message types do not require any progress for m.From.
 	switch m.Type {
@@ -898,7 +932,7 @@ func stepLeader(r *raft, m pb.Message) {
 			r.becomeFollower(r.Term, None)
 		}
 		return
-	case pb.MsgProp:
+	case pb.MsgProp:	// 添加日志的请求
 		if len(m.Entries) == 0 {
 			r.logger.Panicf("%x stepped empty MsgProp", r.id)
 		}
@@ -922,7 +956,9 @@ func stepLeader(r *raft, m pb.Message) {
 				r.pendingConf = true
 			}
 		}
+		// 将日志记录在自己的raftLog中
 		r.appendEntry(m.Entries...)
+		// 向集群中的从节点广播自己的Entries
 		r.bcastAppend()
 		return
 	case pb.MsgReadIndex:
