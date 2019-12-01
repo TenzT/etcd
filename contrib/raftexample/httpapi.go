@@ -25,13 +25,15 @@ import (
 
 // Handler for a http based key-value store backed by raft
 type httpKVAPI struct {
-	store       *kvstore
-	confChangeC chan<- raftpb.ConfChange
+	store       *kvstore                 // 保存用户提交的键值对信息
+	confChangeC chan<- raftpb.ConfChange //
 }
 
+// 处理客户端请求，与raftnode和kvstore交互
 func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := r.RequestURI
 	switch {
+	// PUT方法用于添加（或更新）指定的键值对数据
 	case r.Method == "PUT":
 		v, err := ioutil.ReadAll(r.Body)
 		if err != nil {
@@ -40,17 +42,21 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// store的Propose方法会将信息打包后写入proposeC
 		h.store.Propose(key, string(v))
 
 		// Optimistic-- no waiting for ack from raft. Value is not yet
 		// committed so a subsequent GET on the key may return old value
 		w.WriteHeader(http.StatusNoContent)
+	// GET方法表示从kvstore实例中读取指定的键值对数据
 	case r.Method == "GET":
+		// lookup用于查询kvstore
 		if v, ok := h.store.Lookup(key); ok {
 			w.Write([]byte(v))
 		} else {
 			http.Error(w, "Failed to GET", http.StatusNotFound)
 		}
+	// POST请求表示向集群中新增指定的节点
 	case r.Method == "POST":
 		url, err := ioutil.ReadAll(r.Body)
 		if err != nil {
@@ -75,6 +81,7 @@ func (h *httpKVAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// As above, optimistic that raft will apply the conf change
 		w.WriteHeader(http.StatusNoContent)
+	// DELETE请求表示从集群中删除指定的节点
 	case r.Method == "DELETE":
 		nodeId, err := strconv.ParseUint(key[1:], 0, 64)
 		if err != nil {
