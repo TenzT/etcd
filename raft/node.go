@@ -114,16 +114,26 @@ func (rd Ready) containsUpdates() bool {
 type Node interface {
 	// Tick increments the internal logical clock for the Node by a single tick. Election
 	// timeouts and heartbeat timeouts are in units of ticks.
+	// 用来推进集群的逻辑时钟
 	Tick()
+
 	// Campaign causes the Node to transition to candidate state and start campaigning to become leader.
+	// 当选举计时器超时之后，会调用Campaign()方法转变成Candidate，底层是通过发送MsgHup给自己来实现
+	// 在这里相当于所提供一个由Node来主动发起选举的机会
 	Campaign(ctx context.Context) error
+
 	// Propose proposes that data be appended to the log.
+	// 接收Client发来的写请求时，会调用Propose方法，底层是通过发送MsgProp实现
 	Propose(ctx context.Context, data []byte) error
+
 	// ProposeConfChange proposes config change.
 	// At most one ConfChange can be in the process of going through consensus.
 	// Application needs to call ApplyConfChange when applying EntryConfChange type entry.
+	// 修改集群配置的请求，底层是发送MsgProp实现
 	ProposeConfChange(ctx context.Context, cc pb.ConfChange) error
+
 	// Step advances the state machine using the given message. ctx.Err() will be returned, if any.
+	// 当前节点收到其他节点的消息时调用Step方法
 	Step(ctx context.Context, msg pb.Message) error
 
 	// Ready returns a channel that returns the current point-in-time state.
@@ -131,6 +141,8 @@ type Node interface {
 	//
 	// NOTE: No committed entries from the next Ready may be applied until all committed entries
 	// and snapshots from the previous one have finished.
+	// 返回一个channel，通过该Channel返回的Ready实例中封装了
+	// 底层raft底层相关状态的数据，例如，需要发送到其他节点的消息、交给上层模块的Entry记录等
 	Ready() <-chan Ready
 
 	// Advance notifies the Node that the application has saved progress up to the last Ready.
@@ -142,29 +154,42 @@ type Node interface {
 	// commands. For example. when the last Ready contains a snapshot, the application might take
 	// a long time to apply the snapshot data. To continue receiving Ready without blocking raft
 	// progress, it can call Advance before finishing applying the last ready.
+	// 当上层模块处理完从上述Channel中返回的Ready实例之后，需要调用 Advance （）通知底层的
+	// etcd-raft模块返回新的Ready实例
 	Advance()
+
 	// ApplyConfChange applies config change to the local node.
 	// Returns an opaque ConfState protobuf which must be recorded
 	// in snapshots. Will never return nil; it returns a pointer only
 	// to match MemoryStorage.Compact.
+	// 在收到集群配置请求时，会通过调用 ApplyConfCha口ge （）方法进行处理
 	ApplyConfChange(cc pb.ConfChange) *pb.ConfState
 
 	// TransferLeadership attempts to transfer leadership to the given transferee.
+	// TransferLeadership()方法用于 Leader 节点的转移
 	TransferLeadership(ctx context.Context, lead, transferee uint64)
 
 	// ReadIndex request a read state. The read state will be set in the ready.
 	// Read state has a read index. Once the application advances further than the read
 	// index, any linearizable read requests issued before the read request can be
 	// processed safely. The read state will have the same rctx attached.
+	// 用于处理只读请求
 	ReadIndex(ctx context.Context, rctx []byte) error
 
 	// Status returns the current status of the raft state machine.
+	// 返回当前节点的运行状态
 	Status() Status
+
 	// ReportUnreachable reports the given node is not reachable for the last send.
+	// 通知底层的raft实例，当前节点无法与指定的节点通信
 	ReportUnreachable(id uint64)
+
 	// ReportSnapshot reports the status of the sent snapshot.
+	// 通知底层的raft实例上次发送快照的结果
 	ReportSnapshot(id uint64, status SnapshotStatus)
+
 	// Stop performs any necessary termination of the Node.
+	// 关闭当前节点
 	Stop()
 }
 
@@ -229,14 +254,14 @@ func RestartNode(c *Config) Node {
 // node is the canonical implementation of the Node interface
 // raft相当于一个
 type node struct {
-	propc      chan pb.Message
-	recvc      chan pb.Message
-	confc      chan pb.ConfChange
-	confstatec chan pb.ConfState
-	readyc     chan Ready
-	advancec   chan struct{}
-	tickc      chan struct{}
-	done       chan struct{}
+	propc      chan pb.Message		// 用于接收MsgProp类型消息
+	recvc      chan pb.Message		// 除MsgProp外的其他类型的消息都是走这个通道
+	confc      chan pb.ConfChange	// 配置更改消息
+	confstatec chan pb.ConfState	// 用于向上层模块返回ConfState实例
+	readyc     chan Ready			// 重要！！用于向上层模块返回Ready实例
+	advancec   chan struct{}		// advance的通道
+	tickc      chan struct{}		// tic定时器通道
+	done       chan struct{}		// 当检测到done通道关闭后，在其上阻塞的gor可以继续执行
 	stop       chan struct{}
 	status     chan chan Status
 
@@ -278,28 +303,33 @@ func (n *node) run(r *raft) {
 	var propc chan pb.Message
 	var readyc chan Ready
 	var advancec chan struct{}
+	// 用于记录在unstable中最后一条Entry记录的索引值和Term值
 	var prevLastUnstablei, prevLastUnstablet uint64
 	var havePrevLastUnstablei bool
 	var prevSnapi uint64
 	var rd Ready
 
-	lead := None
+	lead := None	// 用于记录当前Leader节点
 	prevSoftSt := r.softState()
 	prevHardSt := emptyState
 
-	for {	// 永久循环开始，通过调用Raft的函数与raft交互
+	for {	// 永久循环开始，处理上层应用传入的信息，并交给底层raft处理
 		if advancec != nil {
+			// 上层模块还在处理上次从 readye 通道返回的 Ready 实例，所以不能继续向 readye 中写入数据
 			readyc = nil
 		} else {
+			// 从raft底层中包装出Ready数据
 			rd = newReady(r, prevSoftSt, prevHardSt)
 			if rd.containsUpdates() {
 				readyc = n.readyc
 			} else {
+				// 此次创建的Ready实例中各个字段为空，无需交给上层模块处理
 				readyc = nil
 			}
 		}
 
-		if lead != r.lead {
+		if lead != r.lead {	// 检测当前的Leader节点是否发生改变
+			// 如果当前系欸但无法确定集群中的Leader节点，则清空propc，此次循环不再处理
 			if r.hasLeader() {
 				if lead == None {
 					r.logger.Infof("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
@@ -314,7 +344,7 @@ func (n *node) run(r *raft) {
 			lead = r.lead
 		}
 
-		select {
+		select {	// 处理各个与上层应用相连的通道
 		// TODO: maybe buffer the config propose if there exists one (the way
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
@@ -357,8 +387,9 @@ func (n *node) run(r *raft) {
 			case <-n.done:
 			}
 		case <-n.tickc:
+			// 计时器到了就推进逻辑时间
 			r.tick()
-		case readyc <- rd:
+		case readyc <- rd:	// 将前面创建的Ready实例写入node.readyc通道中，等待上层模块读取
 			if rd.SoftState != nil {
 				prevSoftSt = rd.SoftState
 			}
@@ -377,7 +408,7 @@ func (n *node) run(r *raft) {
 			r.msgs = nil
 			r.readStates = nil
 			advancec = n.advancec
-		case <-advancec:
+		case <-advancec:	// 上层模块处理完Ready实例之后，会向advance通道写入信号
 			if prevHardSt.Commit != 0 {
 				r.raftLog.appliedTo(prevHardSt.Commit)
 			}
@@ -390,6 +421,7 @@ func (n *node) run(r *raft) {
 		case c := <-n.status:
 			c <- getStatus(r)
 		case <-n.stop:
+			// 当从stop通道中读取到信号时，会将done通道关闭，阻塞在其上的gor可以继续执行
 			close(n.done)
 			return
 		}
@@ -434,10 +466,11 @@ func (n *node) ProposeConfChange(ctx context.Context, cc pb.ConfChange) error {
 // if any.
 func (n *node) step(ctx context.Context, m pb.Message) error {
 	ch := n.recvc
-	if m.Type == pb.MsgProp {
+	if m.Type == pb.MsgProp {	// 如果是添加日志的信息，则需要换成proc通道
 		ch = n.propc
 	}
 
+	// 将msg塞进通道，在node.run()的状态机中处理
 	select {
 	case ch <- m:
 		return nil
