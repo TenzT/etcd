@@ -273,7 +273,7 @@ func (n *node) Stop() {
 	<-n.done
 }
 
-// node运行的主体
+// node运行的主体，处理通道
 func (n *node) run(r *raft) {
 	var propc chan pb.Message
 	var readyc chan Ready
@@ -287,7 +287,7 @@ func (n *node) run(r *raft) {
 	prevSoftSt := r.softState()
 	prevHardSt := emptyState
 
-	for {
+	for {	// 永久循环开始，通过调用Raft的函数与raft交互
 		if advancec != nil {
 			readyc = nil
 		} else {
