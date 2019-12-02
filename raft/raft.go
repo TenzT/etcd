@@ -544,6 +544,7 @@ func (r *raft) bcastAppend() {
 			return
 		}
 
+		// 这里底层会广播MsgApp类型的消息
 		r.sendAppend(id)
 	})
 }
@@ -570,6 +571,7 @@ func (r *raft) bcastHeartbeatWithCtx(ctx []byte) {
 // maybeCommit attempts to advance the commit index. Returns true if
 // the commit index changed (in which case the caller should call
 // r.bcastAppend).
+// leader的方法
 func (r *raft) maybeCommit() bool {
 	// TODO(bmizerany): optimize.. Currently naive
 	mis := make(uint64Slice, 0, len(r.prs))
@@ -1170,7 +1172,7 @@ func stepCandidate(r *raft, m pb.Message) {
 
 func stepFollower(r *raft, m pb.Message) {
 	switch m.Type {
-	case pb.MsgProp:
+	case pb.MsgProp:	// 如果Follower接收到MsgProp，则会将消息转发给Leader
 		if r.lead == None {
 			r.logger.Infof("%x no leader at term %d; dropping proposal", r.id, r.Term)
 			return
@@ -1178,9 +1180,10 @@ func stepFollower(r *raft, m pb.Message) {
 			r.logger.Infof("%x not forwarding to leader %x at term %d; dropping proposal", r.id, r.lead, r.Term)
 			return
 		}
+		// 将MsgProp消息转发给Leader
 		m.To = r.lead
 		r.send(m)
-	case pb.MsgApp:
+	case pb.MsgApp:	// Leader发来的AppendEntreis请求
 		r.electionElapsed = 0
 		r.lead = m.From
 		r.handleAppendEntries(m)
@@ -1225,6 +1228,7 @@ func stepFollower(r *raft, m pb.Message) {
 	}
 }
 
+// Follower处理从Leader接收到的AppendEntries
 func (r *raft) handleAppendEntries(m pb.Message) {
 	if m.Index < r.raftLog.committed {
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.committed})

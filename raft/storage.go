@@ -236,6 +236,7 @@ func (ms *MemoryStorage) Compact(compactIndex uint64) error {
 // Append the new entries to storage.
 // TODO (xiangli): ensure the entries are continuous and
 // entries[0].Index > ms.entries[0].Index
+// 在ents上追加新的Entry
 func (ms *MemoryStorage) Append(entries []pb.Entry) error {
 	if len(entries) == 0 {
 		return nil
@@ -244,24 +245,32 @@ func (ms *MemoryStorage) Append(entries []pb.Entry) error {
 	ms.Lock()
 	defer ms.Unlock()
 
+	// 检测entries切片的changed
 	first := ms.firstIndex()
+
+	// 获取待添加的最后一条Entry的Index值
 	last := entries[0].Index + uint64(len(entries)) - 1
 
 	// shortcut if there is no new entry.
+	// 待添加的日志全部已过期
 	if last < first {
 		return nil
 	}
+
 	// truncate compacted entries
+	// 待提交的Entry数组中first之前的Entry已经记入SnapShot中，
+	// 不应该再记录到ents中，所以将这部分Entry截掉
 	if first > entries[0].Index {
 		entries = entries[first-entries[0].Index:]
 	}
 
+	// entries切片中第一条可用的Entry与first之间的差距
 	offset := entries[0].Index - ms.ents[0].Index
 	switch {
-	case uint64(len(ms.ents)) > offset:
+	case uint64(len(ms.ents)) > offset:		// 先截断ents再append进来的entries
 		ms.ents = append([]pb.Entry{}, ms.ents[:offset]...)
 		ms.ents = append(ms.ents, entries...)
-	case uint64(len(ms.ents)) == offset:
+	case uint64(len(ms.ents)) == offset:	// 直接在ents上追加entries
 		ms.ents = append(ms.ents, entries...)
 	default:
 		raftLogger.Panicf("missing log entry [last: %d, append at: %d]",

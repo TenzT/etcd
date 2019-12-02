@@ -23,15 +23,19 @@ import (
 
 type raftLog struct {
 	// storage contains all stable entries since the last snapshot.
+	// 包含所有已经稳定(stable)存储的日志
 	storage Storage
 
 	// unstable contains all unstable entries and snapshot.
 	// they will be saved into storage.
+	// 仍未稳定的数据
 	unstable unstable
 
 	// committed is the highest log position that is known to be in
 	// stable storage on a quorum of nodes.
+	// stable数据中最后已提交的日志
 	committed uint64
+
 	// applied is the highest log position that the application has
 	// been instructed to apply to its state machine.
 	// Invariant: applied <= committed
